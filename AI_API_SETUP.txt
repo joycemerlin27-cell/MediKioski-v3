@@ -1,0 +1,29 @@
+MediKiosk AI Summary + Document Fix
+
+This version fixes two doctor-dashboard problems:
+
+1. Uploaded images/documents can now be opened:
+   - The browser sends the doctor's JWT Authorization header.
+   - The server verifies that the doctor is assigned to the patient.
+   - The file is returned securely and opened in a new tab.
+   - No public /uploads route is exposed.
+
+2. AI doctor summary:
+   - Doctor opens a patient file.
+   - A summary is generated automatically.
+   - The doctor can press Generate / Refresh AI Summary.
+   - The summary uses only patient-provided previous history, current issue, and adaptive questionnaire.
+   - The generated summary is saved in SQLite.
+
+Render environment variables:
+  AI_API_KEY=your_provider_key
+  AI_MODEL=gpt-4o-mini
+  AI_API_BASE_URL=https://api.openai.com
+
+Use an OpenAI-compatible provider by changing AI_API_BASE_URL and AI_MODEL.
+
+IMPORTANT:
+- Never put the real API key in GitHub or frontend JavaScript.
+- This is a clinical documentation aid, not a diagnostic or prescribing system.
+- Real deployment requires HTTPS, consent, encryption, access controls, audit logging,
+  retention controls, and applicable Indian privacy/health-data compliance.

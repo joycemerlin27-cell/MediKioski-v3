@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: medikiosk
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "22.22.0"
+      - key: JWT_SECRET
+        generateValue: true
