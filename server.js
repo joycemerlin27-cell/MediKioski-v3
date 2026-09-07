@@ -115,150 +115,98 @@ app.get('*',(req,res)=>res.sendFile(path.join(ROOT,'index.html')));
 app.use((err,req,res,next)=>{console.error(err);res.status(400).json({error:err.message||'Request failed'});});
 
 
-// ---------- AI SUMMARY ----------
-function buildAISummaryPrompt(patient) {
-  const previousHistory = String(patient.history || '').slice(0, 12000);
-  const currentIssue = String(patient.current_issue || '').slice(0, 4000);
-  const adaptive = String(patient.adaptive_questionnaire || '').slice(0, 12000);
 
-  return [
-    'You are a clinical documentation assistant for a hospital OPD workflow.',
-    'Summarize only information explicitly provided by the patient.',
-    'Do not diagnose, prescribe, or invent facts.',
-    'Keep the output concise and useful for a doctor handoff.',
-    'If information is missing, say it is not provided.',
-    'Return ONLY valid JSON with these keys:',
-    'chiefComplaint, historySummary, relevantSymptoms, durationAndPattern, severityAndImpact, relevantHistory, medicationsOrAllergies, redFlagsReported, missingImportantInformation, doctorHandoff',
-    '',
-    'Previous medical history:',
-    previousHistory || '(not provided)',
-    '',
-    'Current issue:',
-    currentIssue || '(not provided)',
-    '',
-    'Adaptive questionnaire answers:',
-    adaptive || '(not provided)'
-  ].join('\n');
+// ---------- GOOGLE GEMINI AI SUMMARY ----------
+function buildGeminiPrompt(patient) {
+  let q = patient.adaptive_questionnaire || "Not provided";
+  return `You are a clinical documentation assistant for a hospital OPD system.
+Create a concise factual doctor handoff from ONLY the information supplied.
+Do not diagnose, prescribe, or invent facts. Say "Not provided" when missing.
+Return ONLY valid JSON with:
+chiefComplaint, historySummary, currentIssueDetails, durationAndPattern,
+severityAndImpact, relevantHistory, medicationsOrAllergies, redFlagsReported,
+missingImportantInformation, doctorHandoff.
+
+Previous medical history:
+${String(patient.history || "Not provided").slice(0,12000)}
+
+Current issue:
+${String(patient.current_issue || "Not provided").slice(0,4000)}
+
+Adaptive questionnaire:
+${String(q).slice(0,12000)}`;
 }
 
-function localSummary(patient) {
+function fallbackAISummary(patient) {
+  let q={}; try { q=JSON.parse(patient.adaptive_questionnaire||"{}"); } catch(_){}
+  const answers=q.answers||{}, questions=q.questions||[];
+  const details=questions.map((x,i)=>{
+    if(!x || answers[String(i)]===undefined || answers[String(i)]==="") return null;
+    return `${x[0]}: ${answers[String(i)]}`;
+  }).filter(Boolean).join("; ");
   return {
-    chiefComplaint: patient.current_issue || 'Not provided',
-    historySummary: patient.history || 'No previous medical history provided.',
-    relevantSymptoms: patient.adaptive_questionnaire || 'No adaptive questionnaire details provided.',
-    durationAndPattern: 'See patient-provided questionnaire details.',
-    severityAndImpact: 'See patient-provided questionnaire details.',
-    relevantHistory: patient.history || 'Not provided',
-    medicationsOrAllergies: 'Not provided',
-    redFlagsReported: 'Not independently assessed; only patient-provided information is summarized.',
-    missingImportantInformation: 'AI provider not configured, so a full AI summary was not generated.',
-    doctorHandoff: 'Review the patient-reported history, current issue and questionnaire before clinical assessment.'
+    chiefComplaint: patient.current_issue||q.currentIssue||"Not provided",
+    historySummary: patient.history||"No previous medical history provided.",
+    currentIssueDetails: details||"No additional questionnaire details provided.",
+    durationAndPattern:"See patient-provided details.",
+    severityAndImpact:"See patient-provided details.",
+    relevantHistory:patient.history||"Not provided",
+    medicationsOrAllergies:"Not provided",
+    redFlagsReported:"Only patient-reported information is included.",
+    missingImportantInformation:"Gemini API is not configured.",
+    doctorHandoff:"Review the patient-reported history and current complaint before clinical assessment."
   };
 }
 
-function callAIProvider(prompt, callback) {
-  const apiKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || '';
-  const baseUrl = process.env.AI_API_BASE_URL || 'https://api.openai.com';
-  const model = process.env.AI_MODEL || 'gpt-4o-mini';
+function callGemini(prompt, callback) {
+  const key=process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||"";
+  const model=process.env.GEMINI_MODEL||"gemini-2.5-flash";
+  if(!key) return callback(null,{configured:false,model,message:"Gemini API is not configured. Add GEMINI_API_KEY in Render Environment Variables."});
 
-  if (!apiKey) return callback(null, {
-    configured: false,
-    model,
-    summary: null,
-    message: 'AI API is not configured. Add AI_API_KEY in Render Environment Variables.'
+  const https=require("https");
+  const path=`/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+  const body=JSON.stringify({
+    systemInstruction:{parts:[{text:"You are a safe clinical documentation assistant. Summarize only supplied information. Never diagnose or prescribe."}]},
+    contents:[{role:"user",parts:[{text:prompt}]}],
+    generationConfig:{temperature:0.1,responseMimeType:"application/json"}
   });
 
-  let u;
-  try { u = new URL('/v1/chat/completions', baseUrl); }
-  catch (_) { return callback(new Error('Invalid AI_API_BASE_URL')); }
-
-  const payload = JSON.stringify({
-    model,
-    temperature: 0.1,
-    response_format: {type:'json_object'},
-    messages: [
-      {role:'system', content:'You are a safe clinical documentation summarizer. Do not diagnose or prescribe.'},
-      {role:'user', content:prompt}
-    ]
-  });
-
-  const https = require('https');
-  const req = https.request({
-    hostname: u.hostname,
-    port: u.port || 443,
-    path: u.pathname + (u.search || ''),
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer ' + apiKey,
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(payload)
-    }
-  }, r => {
-    let raw = '';
-    r.on('data', c => raw += c);
-    r.on('end', () => {
-      let data = {};
-      try { data = JSON.parse(raw); } catch (_) {}
-      if (r.statusCode < 200 || r.statusCode >= 300) {
-        return callback(new Error(data.error?.message || ('AI provider returned HTTP ' + r.statusCode)));
-      }
-      const content = data.choices?.[0]?.message?.content || '';
-      let parsed;
-      try { parsed = JSON.parse(content); }
-      catch (_) { parsed = {doctorHandoff: content}; }
-      callback(null, {configured:true, model, summary:parsed});
+  const req=https.request({
+    hostname:"generativelanguage.googleapis.com",port:443,path,method:"POST",
+    headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)}
+  },r=>{
+    let raw=""; r.on("data",c=>raw+=c); r.on("end",()=>{
+      let d={}; try{d=JSON.parse(raw)}catch(_){}
+      if(r.statusCode<200||r.statusCode>=300)
+        return callback(new Error(d.error?.message||`Gemini returned HTTP ${r.statusCode}`));
+      const text=d.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join("")||"";
+      if(!text)return callback(new Error("Gemini returned an empty response."));
+      let summary;
+      try{summary=JSON.parse(text)}
+      catch(_){try{summary=JSON.parse(text.replace(/^```json\s*/i,"").replace(/```\s*$/,"").trim())}
+        catch(_){summary={doctorHandoff:text}}}
+      callback(null,{configured:true,summary,model});
     });
   });
-  req.on('error', err => callback(err));
-  req.write(payload);
-  req.end();
+  req.setTimeout(30000,()=>req.destroy(new Error("Gemini request timed out.")));
+  req.on("error",callback); req.write(body); req.end();
 }
 
-app.post('/api/doctors/patient/:id/ai-summary', auth, role('doctor'), (req,res) => {
-  const patient = db.prepare(`
-    SELECT p.*, q.queue_no, q.department, q.status
-    FROM patients p
+app.post("/api/doctors/patient/:id/ai-summary",auth,role("doctor"),(req,res)=>{
+  const patient=db.prepare(`
+    SELECT p.*,q.queue_no,q.department,q.status FROM patients p
     JOIN queue q ON q.patient_id=p.id
     WHERE p.id=? AND q.assigned_doctor_id=?
     ORDER BY q.id DESC LIMIT 1
-  `).get(req.params.id, req.user.id);
-
-  if (!patient) return res.status(404).json({error:'Patient not assigned to you'});
-
-  const fallback = localSummary(patient);
-  callAIProvider(buildAISummaryPrompt(patient), (err, result) => {
-    if (err) {
-      return res.status(502).json({
-        error: err.message,
-        configured: true,
-        summary: fallback,
-        fallback: true
-      });
-    }
-
-    if (!result.configured) {
-      return res.json({
-        configured:false,
-        summary:fallback,
-        fallback:true,
-        message:result.message
-      });
-    }
-
-    const summaryText = JSON.stringify(result.summary);
-    try {
-      db.prepare('UPDATE patients SET ai_summary=? WHERE id=?').run(summaryText, patient.id);
-    } catch (_) {}
-
-    res.json({
-      configured:true,
-      summary:result.summary,
-      model:result.model,
-      saved:true
-    });
+  `).get(req.params.id,req.user.id);
+  if(!patient)return res.status(404).json({error:"Patient not assigned to you"});
+  const fallback=fallbackAISummary(patient);
+  callGemini(buildGeminiPrompt(patient),(err,result)=>{
+    if(err)return res.status(502).json({error:err.message,configured:true,summary:fallback,fallback:true});
+    if(!result.configured)return res.json({configured:false,summary:fallback,fallback:true,message:result.message});
+    try{db.prepare("UPDATE patients SET ai_summary=? WHERE id=?").run(JSON.stringify(result.summary),patient.id)}catch(_){}
+    res.json({configured:true,summary:result.summary,model:result.model,saved:true});
   });
 });
 
-app.get('*',(req,res)=>res.sendFile(path.join(ROOT,'index.html')));
-app.use((err,req,res,next)=>{console.error(err);res.status(400).json({error:err.message||'Request failed'});});
 app.listen(PORT,()=>console.log(`MediKiosk running at http://localhost:${PORT}`));

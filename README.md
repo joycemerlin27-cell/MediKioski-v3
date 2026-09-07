@@ -26,3 +26,7 @@ This is a prototype. Do not use real patient medical data in production without 
 
 ## v7 fixes
 Doctor document opening now uses authenticated blob requests, and the doctor file view includes automatic AI summary generation. See `AI_API_SETUP.txt`.
+
+
+## v8 Gemini integration
+Google Gemini is used for the doctor AI summary. Configure `GEMINI_API_KEY` and `GEMINI_MODEL` on Render.
